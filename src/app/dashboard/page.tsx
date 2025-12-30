@@ -8,45 +8,87 @@ import { FlightPlan, FlightMessage } from '@/lib/homebriefing/types';
 type TabType = 'current' | 'archive';
 
 // Status display logic based on Homebriefing status codes and flCanDo bitmask
-function getStatusDisplay(statusCode: number, statusStr: string, flCanDo: number): { color: string; label: string } {
-  // flCanDo bitmask indicates what actions are available:
-  // 12 = full actions (CHG, DLA, CNL, DEP, ARR) - active flight
-  // 4 = limited actions - cancelled/rejected state
-  // 1 = minimal - completed flight
-
-  // Check for cancelled: accepted status code (48, 53) but flCanDo = 4
-  if ((statusCode === 48 || statusCode === 53) && flCanDo === 4) {
-    return { color: 'bg-red-100 text-red-800', label: 'Cancelled' };
-  }
-
+// flCanDo bitmask: 1=DEP, 3=ARR, 4=CNL, 7=DLA, 16=CHG (values can be combined)
+// Active flight = statusCode 48/53 + EOBT in future or recent past
+function getStatusDisplay(statusCode: number, statusStr: string, flCanDo: number, eobdt?: string): { color: string; label: string } {
   // Rejected states
   if (statusCode === 49 || statusCode === 490 || statusCode === 491) {
     return { color: 'bg-red-100 text-red-800', label: 'Rejected' };
   }
 
-  // Accepted/Filed states (green) - with full actions available
-  if ((statusCode === 48 || statusCode === 53) && flCanDo >= 8) {
-    return { color: 'bg-green-100 text-green-800', label: statusStr };
-  }
-
-  // Completed flights (flCanDo = 1) - show as completed
-  if (flCanDo === 1 && (statusCode === 48 || statusCode === 53)) {
-    return { color: 'bg-purple-100 text-purple-800', label: 'Completed' };
+  // Cancelled status codes
+  if (statusCode === 4 || statusCode === 7) {
+    return { color: 'bg-red-100 text-red-800', label: 'Cancelled' };
   }
 
   // Received/Processing states
   if (statusCode === 11) {
-    return { color: 'bg-blue-100 text-blue-800', label: statusStr };
+    return { color: 'bg-blue-100 text-blue-800', label: 'Processing' };
   }
 
-  // Cancelled/Closed status codes
-  if (statusCode === 4 || statusCode === 7) {
-    return { color: 'bg-red-100 text-red-800', label: 'Cancelled' };
+  // Accepted states (48, 53)
+  if (statusCode === 48 || statusCode === 53) {
+    // Check if flight is in the past (more than 3 hours after EOBT)
+    if (eobdt) {
+      const flightTime = new Date(eobdt).getTime();
+      const now = Date.now();
+      const threeHoursAgo = now - 3 * 60 * 60 * 1000;
+
+      // Flight is in future or within 3 hours = Active
+      if (flightTime > threeHoursAgo) {
+        return { color: 'bg-green-100 text-green-800', label: 'Accepted' };
+      }
+
+      // Flight is in the past (>3 hours ago)
+      // flCanDo = 0 or flCanDo = 4 (only CNL view) = historical
+      if (flCanDo === 0) {
+        return { color: 'bg-slate-100 text-slate-800', label: 'Completed' };
+      }
+      // Past flight with flCanDo = 4 could be cancelled
+      return { color: 'bg-slate-100 text-slate-800', label: 'Completed' };
+    }
+
+    // No EOBT, fall back to flCanDo
+    if (flCanDo > 0) {
+      return { color: 'bg-green-100 text-green-800', label: 'Accepted' };
+    }
+    return { color: 'bg-slate-100 text-slate-800', label: 'Completed' };
   }
 
   // Default: use the API-provided status string
   return { color: 'bg-slate-100 text-slate-800', label: statusStr };
 }
+
+// Homebriefing button enable/disable logic based on flCanDo bitmask
+// Priority order: 7 -> 4 -> 16 -> 3 -> 1
+// flCanDo=7: all buttons DISABLED
+// flCanDo=4: all buttons DISABLED
+// flCanDo=16: DLA, CNL, CHG, DEP DISABLED (only ARR enabled)
+// flCanDo=3: NO buttons disabled (DLA, CNL available)
+// flCanDo=1: NO buttons disabled (DLA, CNL available)
+// Also requires statusCode to be 48 or 53 (accepted)
+
+function canPerformActions(statusCode: number, flCanDo: number): boolean {
+  // Must be accepted status (48 or 53)
+  if (statusCode !== 48 && statusCode !== 53) {
+    return false;
+  }
+
+  // Check priority order - if higher priority matches, use that result
+  // 7 and 4 disable everything
+  if ((flCanDo & 7) === 7) return false;
+  if ((flCanDo & 4) === 4) return false;
+
+  // 16 disables DLA/CNL
+  if ((flCanDo & 16) === 16) return false;
+
+  // 3 and 1 enable everything
+  if ((flCanDo & 3) === 3) return true;
+  if ((flCanDo & 1) === 1) return true;
+
+  return false;
+}
+
 
 function formatDateTime(dateStr: string): { date: string; time: string } {
   const d = new Date(dateStr);
@@ -83,16 +125,29 @@ function FlightPlanDetailModal({
   fp,
   onClose,
   onSessionExpired,
+  onRefresh,
+  isArchive,
 }: {
   fp: FlightPlan;
   onClose: () => void;
   onSessionExpired: () => void;
+  onRefresh: () => void;
+  isArchive: boolean;
 }) {
   const [messages, setMessages] = useState<FlightMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showDelayModal, setShowDelayModal] = useState(false);
+  const [delayTime, setDelayTime] = useState('');
+  const [delaying, setDelaying] = useState(false);
+  const [delayError, setDelayError] = useState<string | null>(null);
+  const [delaySuccess, setDelaySuccess] = useState(false);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelSuccess, setCancelSuccess] = useState(false);
   const { date, time } = formatDateTime(fp.eobdt);
-  const status = getStatusDisplay(fp.flStatusCode, fp.flStatusStr, fp.flCanDo);
+  const status = getStatusDisplay(fp.flStatusCode, fp.flStatusStr, fp.flCanDo, fp.eobdt);
 
   // Use ref to avoid dependency on onSessionExpired causing re-renders
   const onSessionExpiredRef = useRef(onSessionExpired);
@@ -128,6 +183,85 @@ function FlightPlanDetailModal({
     fetchMessages();
   }, [fp.flId]);
 
+  // Handle delay submission
+  const handleDelay = async () => {
+    if (!delayTime || !/^\d{4}$/.test(delayTime)) {
+      setDelayError('Enter time in HHMM format (e.g., 1200)');
+      return;
+    }
+
+    setDelaying(true);
+    setDelayError(null);
+
+    try {
+      const res = await fetch(`/api/flight-plans/${fp.flId}/delay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newEobt: delayTime }),
+      });
+
+      if (res.status === 401) {
+        onSessionExpiredRef.current();
+        return;
+      }
+
+      const data = await res.json();
+
+      if (data.success) {
+        setDelaySuccess(true);
+        // Refresh the flight plans list after successful delay
+        setTimeout(() => {
+          onRefresh();
+          onClose();
+        }, 1500);
+      } else {
+        setDelayError(data.errorMessage || data.error || 'Failed to send delay');
+      }
+    } catch {
+      setDelayError('Failed to send delay message');
+    } finally {
+      setDelaying(false);
+    }
+  };
+
+  // Get current EOBT time in HHMM format
+  const currentEobt = fp.eobdt ? new Date(fp.eobdt).toISOString().slice(11, 16).replace(':', '') : '';
+
+  // Handle cancel submission
+  const handleCancel = async () => {
+    setCancelling(true);
+    setCancelError(null);
+
+    try {
+      const res = await fetch(`/api/flight-plans/${fp.flId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (res.status === 401) {
+        onSessionExpiredRef.current();
+        return;
+      }
+
+      const data = await res.json();
+
+      if (data.success) {
+        setCancelSuccess(true);
+        // Refresh the flight plans list after successful cancel
+        setTimeout(() => {
+          onRefresh();
+          onClose();
+        }, 1500);
+      } else {
+        setCancelError(data.errorMessage || data.error || 'Failed to send cancel');
+      }
+    } catch {
+      setCancelError('Failed to send cancel message');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
@@ -162,7 +296,148 @@ function FlightPlanDetailModal({
               </svg>
             </button>
           </div>
+
+          {/* Action buttons */}
+          {!isArchive && canPerformActions(fp.flStatusCode, fp.flCanDo) && (
+            <div className="mt-4 flex gap-2">
+              <button
+                onClick={() => {
+                  setDelayTime(currentEobt);
+                  setShowDelayModal(true);
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 hover:bg-orange-200 rounded-lg transition"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Delay (DLA)
+              </button>
+              <button
+                onClick={() => setShowCancelModal(true)}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-red-700 bg-red-100 hover:bg-red-200 rounded-lg transition"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Cancel (CNL)
+              </button>
+            </div>
+          )}
         </div>
+
+        {/* Delay Modal */}
+        {showDelayModal && (
+          <div className="p-6 border-b border-slate-200 bg-orange-50">
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Delay Flight Plan</h3>
+
+            {delaySuccess ? (
+              <div className="p-4 bg-green-50 border border-green-200 rounded-lg text-green-700">
+                Delay message sent successfully!
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-slate-600 mb-4">
+                  Enter the new EOBT (Estimated Off-Block Time) in UTC.
+                  Current EOBT: <span className="font-mono font-medium">{time}z</span>
+                </p>
+
+                <div className="flex items-center gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      New EOBT (HHMM)
+                    </label>
+                    <input
+                      type="text"
+                      value={delayTime}
+                      onChange={(e) => setDelayTime(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      placeholder="1200"
+                      className="w-24 px-3 py-2 border border-slate-300 rounded-lg font-mono text-center focus:ring-2 focus:ring-orange-500 focus:border-orange-500"
+                      maxLength={4}
+                    />
+                  </div>
+
+                  <div className="flex gap-2 mt-6">
+                    <button
+                      onClick={handleDelay}
+                      disabled={delaying || !delayTime}
+                      className="px-4 py-2 bg-orange-600 text-white rounded-lg font-medium hover:bg-orange-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {delaying ? 'Sending...' : 'Send DLA'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowDelayModal(false);
+                        setDelayError(null);
+                        setDelayTime('');
+                      }}
+                      className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+
+                {delayError && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                    {delayError}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Cancel Modal */}
+        {showCancelModal && (
+          <div className="p-6 border-b border-slate-200 bg-red-50">
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Cancel Flight Plan</h3>
+
+            {cancelSuccess ? (
+              <div className="p-4 bg-green-50 border border-green-200 rounded-lg text-green-700">
+                Cancel message sent successfully!
+              </div>
+            ) : (
+              <>
+                <div className="p-4 bg-red-100 border border-red-300 rounded-lg mb-4">
+                  <p className="text-red-800 font-medium">
+                    Are you sure you want to cancel this flight plan?
+                  </p>
+                  <p className="text-red-700 text-sm mt-1">
+                    {fp.arcid}: {fp.adep} → {fp.ades} on {date} at {time}z
+                  </p>
+                  <p className="text-red-600 text-xs mt-2">
+                    This action cannot be undone. A CNL message will be sent to ATC.
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {cancelling ? 'Sending...' : 'Confirm Cancel'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowCancelModal(false);
+                      setCancelError(null);
+                    }}
+                    className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                  >
+                    Go Back
+                  </button>
+                </div>
+
+                {cancelError && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                    {cancelError}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         {/* Flight Details */}
         <div className="p-6 border-b border-slate-200 bg-slate-50">
@@ -282,7 +557,7 @@ function FlightPlanCard({ fp, onClick }: { fp: FlightPlan; onClick: () => void }
           <span className="ml-2 text-sm text-slate-500">{fp.arcType}</span>
         </div>
         {(() => {
-          const status = getStatusDisplay(fp.flStatusCode, fp.flStatusStr, fp.flCanDo);
+          const status = getStatusDisplay(fp.flStatusCode, fp.flStatusStr, fp.flCanDo, fp.eobdt);
           return (
             <span className={`text-xs font-medium px-2 py-1 rounded-full ${status.color}`}>
               {status.label}
@@ -352,6 +627,8 @@ export default function DashboardPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [selectedFlightPlan, setSelectedFlightPlan] = useState<FlightPlan | null>(null);
   const [utcTime, setUtcTime] = useState<string>('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   // Update UTC time every second
   useEffect(() => {
@@ -364,8 +641,12 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const fetchFlightPlans = useCallback(async (type: TabType) => {
-    setLoading(true);
+  const fetchFlightPlans = useCallback(async (type: TabType, isRefresh = false) => {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
     try {
       const res = await fetch(`/api/flight-plans?type=${type}`);
@@ -379,17 +660,35 @@ export default function DashboardPage() {
       } else {
         setFlightPlans(data.flightPlans || []);
         setTotalCount(data.fplsCount || 0);
+        setLastRefresh(new Date());
       }
     } catch {
       setError('Failed to fetch flight plans');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [router]);
 
+  // Initial fetch and tab change
   useEffect(() => {
     fetchFlightPlans(activeTab);
   }, [activeTab, fetchFlightPlans]);
+
+  // Auto-refresh every 30 seconds for current tab only
+  useEffect(() => {
+    if (activeTab !== 'current') return;
+
+    const interval = setInterval(() => {
+      fetchFlightPlans('current', true);
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [activeTab, fetchFlightPlans]);
+
+  const handleRefresh = () => {
+    fetchFlightPlans(activeTab, true);
+  };
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -432,7 +731,27 @@ export default function DashboardPage() {
         {/* Title and Tabs */}
         <div className="mb-8">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="text-2xl font-bold text-slate-800">Flight Plans</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-2xl font-bold text-slate-800">Flight Plans</h2>
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition disabled:opacity-50"
+                title={lastRefresh ? `Last updated: ${lastRefresh.toLocaleTimeString()}` : 'Refresh'}
+              >
+                <svg
+                  className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </button>
+              {activeTab === 'current' && (
+                <span className="text-xs text-slate-400">Auto-refresh: 30s</span>
+              )}
+            </div>
             <Link
               href="/new-flight-plan"
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition"
@@ -540,6 +859,8 @@ export default function DashboardPage() {
           fp={selectedFlightPlan}
           onClose={() => setSelectedFlightPlan(null)}
           onSessionExpired={() => router.push('/login')}
+          onRefresh={() => fetchFlightPlans(activeTab, true)}
+          isArchive={activeTab === 'archive'}
         />
       )}
     </div>

@@ -1,4 +1,4 @@
-import { FlightPlan, FlightPlanFilters, FlightPlanListResponse, FlightMessage, FlightMessagesResponse, FlightPlanFormData, FlightPlanValidationResponse, FieldError, FlightPlanTemplateListResponse, FlightPlanTemplateListItem, FlightPlanTemplateResponse, FlightPlanTemplateData, SaveTemplateRequest, SaveTemplateResponse, DeleteTemplateResponse } from './types';
+import { FlightPlan, FlightPlanFilters, FlightPlanListResponse, FlightMessage, FlightMessagesResponse, FlightPlanFormData, FlightPlanValidationResponse, FlightPlanSubmitResponse, FieldError, FlightPlanTemplateListResponse, FlightPlanTemplateListItem, FlightPlanTemplateResponse, FlightPlanTemplateData, SaveTemplateRequest, SaveTemplateResponse, DeleteTemplateResponse, FlightPlanActionResponse } from './types';
 
 const BASE_URL = 'https://hbs.ixosystem.eu/ixo';
 
@@ -912,6 +912,60 @@ export class HomebriefingClient {
     };
   }
 
+  // Send flight plan to CARO (ATC)
+  async sendFlightPlan(
+    cookies: string,
+    token: string,
+    userSession: string,
+    formData: FlightPlanFormData
+  ): Promise<FlightPlanSubmitResponse> {
+    const soapRequest = `<?xml version="1.0" encoding="utf-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:mob="http://mobiltech.sk/"><soapenv:Body><mob:SendFplToCaroRequest><mob:FlAttributes><ARCID>${this.escapeXml(formData.arcid)}</ARCID><FlRules>${formData.flRules}</FlRules><FlType>${formData.flType}</FlType><ArcNum>${formData.arcNum || ''}</ArcNum><ArcType>${this.escapeXml(formData.arcType)}</ArcType><WakeTurbulenceCat>${formData.wakeTurbulenceCat}</WakeTurbulenceCat><Equipment>${this.escapeXml(formData.equipment)}</Equipment><ADEP>${this.escapeXml(formData.adep)}</ADEP><EOBDT>${formData.eobdt}</EOBDT><FlSpeed>${this.escapeXml(formData.flSpeed)}</FlSpeed><FlLevel>${this.escapeXml(formData.flLevel)}</FlLevel><FlRoute>${this.escapeXml(formData.flRoute)}</FlRoute><ADES>${this.escapeXml(formData.ades)}</ADES><ADAltn1>${this.escapeXml(formData.adAltn1 || '')}</ADAltn1><ADAltn2>${this.escapeXml(formData.adAltn2 || '')}</ADAltn2><TotalEET>${formData.totalEet}</TotalEET><FlOther>${this.escapeXml(formData.flOther || '')}</FlOther><FlSuplementary>${this.escapeXml(formData.flSuplementary || '')}</FlSuplementary><AddInfoPilottel>${this.escapeXml(formData.pilotTel || '')}</AddInfoPilottel></mob:FlAttributes><mob:UseNMB2B>0</mob:UseNMB2B><mob:UserSession>${userSession}</mob:UserSession></mob:SendFplToCaroRequest></soapenv:Body></soapenv:Envelope>`;
+
+    const response = await fetch(`${BASE_URL}/ibafProvider.php`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml; charset="UTF-8"',
+        'Accept': 'application/xml, text/xml, */*; q=0.01',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Cookie': cookies,
+        'X-AisWeb-Token': token,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://hbs.ixosystem.eu',
+      },
+      body: soapRequest,
+    });
+
+    const xmlText = await response.text();
+    return this.parseSendFlightPlanResponse(xmlText);
+  }
+
+  private parseSendFlightPlanResponse(xml: string): FlightPlanSubmitResponse {
+    // Check for session expiry first
+    if (isSessionExpiredResponse(xml)) {
+      return {
+        isError: true,
+        sessionExpired: true,
+        fplIsSent: false,
+      };
+    }
+
+    const getTagValue = (tag: string, content: string): string => {
+      const regex = new RegExp(`<(?:ns1:)?${tag}>([^<]*)</(?:ns1:)?${tag}>`, 'i');
+      const match = content.match(regex);
+      return match ? match[1] : '';
+    };
+
+    const isError = getTagValue('IsError', xml) === '1';
+    const fplIsSent = getTagValue('FplIsSent', xml) === '1';
+    const errMsg = getTagValue('ErrMsg', xml);
+
+    return {
+      isError,
+      fplIsSent,
+      errorMessage: errMsg || undefined,
+    };
+  }
+
   // Delete a flight plan template
   async deleteTemplate(
     cookies: string,
@@ -964,6 +1018,89 @@ export class HomebriefingClient {
       success: !isError && !!deletedTplId,
       deletedTplId,
       errorMessage: errorMsg || undefined,
+    };
+  }
+
+  // Send delay (DLA) message for a flight plan
+  async sendDelay(
+    cookies: string,
+    token: string,
+    userSession: string,
+    flId: number,
+    newEobt: string  // New EOBT time in HHMM format (e.g., "1200")
+  ): Promise<FlightPlanActionResponse> {
+    const soapRequest = `<?xml version="1.0" encoding="utf-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:mob="http://mobiltech.sk/"><soapenv:Body><mob:SendDLARequest><mob:FlId>${flId}</mob:FlId><mob:EobtVal>${newEobt}</mob:EobtVal><mob:UserSession>${userSession}</mob:UserSession></mob:SendDLARequest></soapenv:Body></soapenv:Envelope>`;
+
+    const response = await fetch(`${BASE_URL}/ibafProvider.php`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml; charset="UTF-8"',
+        'Accept': 'application/xml, text/xml, */*; q=0.01',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Cookie': cookies,
+        'X-AisWeb-Token': token,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://hbs.ixosystem.eu',
+      },
+      body: soapRequest,
+    });
+
+    const xmlText = await response.text();
+    return this.parseActionResponse(xmlText);
+  }
+
+  // Send cancel (CNL) message for a flight plan
+  async sendCancel(
+    cookies: string,
+    token: string,
+    userSession: string,
+    flId: number
+  ): Promise<FlightPlanActionResponse> {
+    const soapRequest = `<?xml version="1.0" encoding="utf-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:mob="http://mobiltech.sk/"><soapenv:Body><mob:SendCNLRequest><mob:FlId>${flId}</mob:FlId><mob:UserSession>${userSession}</mob:UserSession></mob:SendCNLRequest></soapenv:Body></soapenv:Envelope>`;
+
+    const response = await fetch(`${BASE_URL}/ibafProvider.php`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml; charset="UTF-8"',
+        'Accept': 'application/xml, text/xml, */*; q=0.01',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Cookie': cookies,
+        'X-AisWeb-Token': token,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://hbs.ixosystem.eu',
+      },
+      body: soapRequest,
+    });
+
+    const xmlText = await response.text();
+    return this.parseActionResponse(xmlText);
+  }
+
+  private parseActionResponse(xml: string): FlightPlanActionResponse {
+    // Check for session expiry first
+    if (isSessionExpiredResponse(xml)) {
+      return {
+        isError: true,
+        sessionExpired: true,
+        success: false,
+      };
+    }
+
+    const getTagValue = (tag: string, content: string): string => {
+      const regex = new RegExp(`<(?:ns1:)?${tag}>([^<]*)</(?:ns1:)?${tag}>`, 'i');
+      const match = content.match(regex);
+      return match ? match[1] : '';
+    };
+
+    const isError = getTagValue('IsError', xml) === '1';
+    const msgSent = getTagValue('MsgSent', xml) === '1';
+    const errMsg = getTagValue('ErrMsg', xml);
+
+    return {
+      isError,
+      success: !isError && msgSent,
+      msgSent,
+      errorMessage: errMsg || undefined,
     };
   }
 }

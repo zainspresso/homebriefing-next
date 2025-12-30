@@ -118,9 +118,9 @@ export interface FlightPlanValidationResponse {
 
 export interface FlightPlanSubmitResponse {
   isError: boolean;
-  success: boolean;
-  flId?: number;              // New flight plan ID if successful
-  errorMessages?: string[];
+  sessionExpired?: boolean;
+  fplIsSent: boolean;
+  errorMessage?: string;
 }
 
 // Flight plan template types
@@ -214,5 +214,14 @@ export interface DeleteTemplateResponse {
   sessionExpired?: boolean;
   success: boolean;
   deletedTplId?: number;
+  errorMessage?: string;
+}
+
+// Flight plan action responses (DLA, CNL)
+export interface FlightPlanActionResponse {
+  isError: boolean;
+  sessionExpired?: boolean;
+  success: boolean;
+  msgSent?: boolean;
   errorMessage?: string;
 }

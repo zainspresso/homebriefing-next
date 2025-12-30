@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { FlightPlanFormData, FlightPlanValidationResponse, FlightPlanTemplateListItem, FlightPlanTemplateData } from '@/lib/homebriefing/types';
+import { FlightPlanFormData, FlightPlanValidationResponse, FlightPlanSubmitResponse, FlightPlanTemplateListItem, FlightPlanTemplateData } from '@/lib/homebriefing/types';
 
 // Map field codes to readable field names
 const fieldCodeToName: Record<string, string> = {
@@ -728,6 +728,9 @@ export default function NewFlightPlanPage() {
   });
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<FlightPlanValidationResponse | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<FlightPlanSubmitResponse | null>(null);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [utcTime, setUtcTime] = useState<string>('');
   const [showField18Modal, setShowField18Modal] = useState(false);
   const [field18Data, setField18Data] = useState<Field18Data>({ sts: [], pbn: [], per: '', eurProtected: false, rfp: '', stayInfo: Array(9).fill(''), textFields: {} });
@@ -1061,6 +1064,55 @@ export default function NewFlightPlanPage() {
       });
     } finally {
       setValidating(false);
+    }
+  };
+
+  const handleFileClick = () => {
+    if (!validationResult?.fplIsOk) return;
+    setShowConfirmModal(true);
+  };
+
+  const handleConfirmSend = async () => {
+    setShowConfirmModal(false);
+    setSending(true);
+    setSendResult(null);
+
+    try {
+      // Convert datetime-local to HB format
+      const submitData = {
+        ...formData,
+        eobdt: formatEobdt(formData.eobdt),
+      };
+
+      const res = await fetch('/api/flight-plans/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(submitData),
+      });
+
+      if (res.status === 401) {
+        router.push('/login');
+        return;
+      }
+
+      const result: FlightPlanSubmitResponse = await res.json();
+      setSendResult(result);
+
+      if (result.fplIsSent) {
+        // Success - redirect to dashboard after a brief delay
+        setTimeout(() => {
+          router.push('/dashboard');
+        }, 1500);
+      }
+    } catch (error) {
+      console.error('Send error:', error);
+      setSendResult({
+        isError: true,
+        fplIsSent: false,
+        errorMessage: 'Failed to send flight plan',
+      });
+    } finally {
+      setSending(false);
     }
   };
 
@@ -1905,6 +1957,35 @@ export default function NewFlightPlanPage() {
             </div>
           )}
 
+          {/* Send Result */}
+          {sendResult && (
+            <div className={`p-4 rounded-lg ${sendResult.fplIsSent ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
+              {sendResult.fplIsSent ? (
+                <div className="flex items-center gap-3">
+                  <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <div>
+                    <p className="font-medium text-green-800">Flight plan filed successfully!</p>
+                    <p className="text-sm text-green-600">Redirecting to dashboard...</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start gap-3">
+                  <svg className="w-6 h-6 text-red-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <div>
+                    <p className="font-medium text-red-800">Failed to file flight plan</p>
+                    {sendResult.errorMessage && (
+                      <p className="text-sm text-red-600 mt-1">{sendResult.errorMessage}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Actions */}
           <div className="flex gap-4 justify-end">
             <Link
@@ -1916,21 +1997,97 @@ export default function NewFlightPlanPage() {
             <button
               type="button"
               onClick={handleValidate}
-              disabled={validating}
+              disabled={validating || sending}
               className="px-6 py-3 bg-slate-200 text-slate-800 rounded-lg font-medium hover:bg-slate-300 transition disabled:opacity-50"
             >
               {validating ? 'Validating...' : 'Validate'}
             </button>
             <button
               type="button"
-              disabled={!validationResult?.fplIsOk}
+              onClick={handleFileClick}
+              disabled={!validationResult?.fplIsOk || sending || sendResult?.fplIsSent}
               className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              File Flight Plan
+              {sending ? 'Sending...' : sendResult?.fplIsSent ? 'Sent!' : 'File Flight Plan'}
             </button>
           </div>
         </form>
       </main>
+
+      {/* Confirm Send Modal */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowConfirmModal(false)}>
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-slate-200">
+              <h2 className="text-lg font-bold text-slate-800">Confirm Flight Plan Filing</h2>
+              <p className="text-sm text-slate-500 mt-1">
+                Please verify the details before submitting
+              </p>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="bg-slate-50 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-2xl font-bold text-slate-800 font-mono">{formData.arcid}</span>
+                  <span className="text-sm bg-blue-100 text-blue-700 px-2 py-1 rounded font-medium">
+                    {formData.flRules === 'V' ? 'VFR' : formData.flRules === 'I' ? 'IFR' : formData.flRules}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-lg text-slate-700 mb-2">
+                  <span className="font-mono font-medium">{formData.adep}</span>
+                  <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                  </svg>
+                  <span className="font-mono font-medium">{formData.ades}</span>
+                </div>
+                <div className="text-sm text-slate-600 space-y-1">
+                  <p>
+                    <span className="text-slate-500">Date/Time:</span>{' '}
+                    <span className="font-mono">{new Date(formData.eobdt).toLocaleString('en-GB', {
+                      day: '2-digit',
+                      month: 'short',
+                      year: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      timeZone: 'UTC'
+                    })} UTC</span>
+                  </p>
+                  <p>
+                    <span className="text-slate-500">Route:</span>{' '}
+                    <span className="font-mono">{formData.flRoute}</span>
+                  </p>
+                  <p>
+                    <span className="text-slate-500">Aircraft:</span>{' '}
+                    <span className="font-mono">{formData.arcType}</span>
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-amber-700 bg-amber-50 p-2 rounded flex items-start gap-2">
+                <svg className="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <span>This will submit your flight plan to ATC. Make sure all details are correct.</span>
+              </p>
+            </div>
+            <div className="p-4 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowConfirmModal(false)}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmSend}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+              >
+                File Flight Plan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Field 18 Settings Modal */}
       <Field18SettingsModal

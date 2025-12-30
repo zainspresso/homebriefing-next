@@ -6,9 +6,11 @@ A modern, user-friendly web interface for [LVNL Homebriefing](https://hbs.ixosys
 
 - **Modern UI** - Clean, responsive interface built with Next.js and Tailwind CSS
 - **Flight Plan Management** - View active and archived flight plans with detailed status information
-- **Flight Plan Filing** - Create and validate new flight plans with comprehensive Field 18 and Field 19 support
+- **Flight Plan Filing** - Create, validate, and submit new flight plans with comprehensive Field 18 and Field 19 support
+- **Flight Plan Actions** - Delay (DLA) and Cancel (CNL) active flight plans directly from the dashboard
 - **Templates** - Save, load, and manage flight plan templates for frequently flown routes
-- **Message History** - View all AFTN messages (FPL, ACK, REJ, DEP, ARR, etc.) for each flight plan
+- **Message History** - View all AFTN messages (FPL, ACK, REJ, DEP, ARR, DLA, CNL, etc.) for each flight plan
+- **Auto-refresh** - Active flight plans automatically refresh every 30 seconds
 - **Real-time UTC Clock** - Always visible UTC time for flight planning
 
 ## Privacy
@@ -81,7 +83,10 @@ src/
 | `/api/auth/check` | GET | Check authentication status |
 | `/api/flight-plans` | GET | List flight plans (active/archive) |
 | `/api/flight-plans/[flId]/messages` | GET | Get flight plan messages |
+| `/api/flight-plans/[flId]/delay` | POST | Send delay (DLA) message |
+| `/api/flight-plans/[flId]/cancel` | POST | Send cancel (CNL) message |
 | `/api/flight-plans/validate` | POST | Validate a flight plan |
+| `/api/flight-plans/send` | POST | Submit flight plan to ATC |
 | `/api/flight-plans/templates` | GET | List templates |
 | `/api/flight-plans/templates` | POST | Save template |
 | `/api/flight-plans/templates/[tplId]` | GET | Get template details |
