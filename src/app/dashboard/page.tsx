@@ -407,7 +407,7 @@ export default function DashboardPage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             <div className="flex items-center gap-3">
-              <h1 className="text-xl font-bold text-slate-800">Homebriefing</h1>
+              <h1 className="text-xl font-bold text-slate-800">Home Briefing</h1>
               <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full font-medium">
                 Next
               </span>
